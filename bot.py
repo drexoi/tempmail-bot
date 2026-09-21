@@ -23,7 +23,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAGO_AfXv8-ubRmCWQwrlYn8d3O37MZHoLE"
+BOT_TOKEN = "8724616175:AAFw23RyOhoqCJEspO0O5RVnM_BvWXnyX3s"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
@@ -48,10 +48,16 @@ CREATE TABLE IF NOT EXISTS users (
     credits INTEGER DEFAULT 1,
     is_permanent INTEGER DEFAULT 0,
     current_email TEXT DEFAULT NULL,
-    session_id TEXT DEFAULT NULL,
+    mail_token TEXT DEFAULT NULL,
     referred_by INTEGER DEFAULT NULL
 )
 """)
+
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN mail_token TEXT DEFAULT NULL")
+    conn.commit()
+except Exception:
+    pass
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -136,37 +142,63 @@ def get_main_keyboard(user_id):
     return markup
 
 def get_user_status(user_id):
-    cursor.execute("SELECT credits, is_permanent, current_email, session_id FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT credits, is_permanent, current_email, mail_token FROM users WHERE user_id = ?", (user_id,))
     return cursor.fetchone()
 
-# ================= 1SECMAIL MULTI-DOMAIN ENGINE =================
-DOMAINS = ["1secmail.com", "1secmail.net", "1secmail.org", "kzccv.com", "qiott.com"]
-REQ_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+# ================= MAIL.TM API IMPLEMENTATION =================
+BASE_URL = "https://api.mail.tm"
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json"
 }
 
-def generate_simple_mail():
-    user = f"ox_{random_str(7)}"
-    domain = random.choice(DOMAINS)
-    return f"{user}@{domain}"
-
-def check_simple_inbox(email_address):
+def create_mailtm():
     try:
-        user, domain = email_address.split("@")
-        url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={user}&domain={domain}"
-        r = requests.get(url, headers=REQ_HEADERS, timeout=10)
-        if r.status_code == 200:
-            return r.json(), user, domain
+        r_dom = requests.get(f"{BASE_URL}/domains", headers=HEADERS, timeout=10)
+        domains_list = r_dom.json().get("hydra:member", [])
+        if not domains_list:
+            return None, None
+        domain = domains_list[0]["domain"]
+
+        username = f"user_{random_str(8)}"
+        address = f"{username}@{domain}"
+        password = f"P@{random_str(10)}"
+        payload = {"address": address, "password": password}
+
+        r_acc = requests.post(f"{BASE_URL}/accounts", json=payload, headers=HEADERS, timeout=10)
+        if r_acc.status_code not in [200, 201]:
+            return None, None
+
+        r_tok = requests.post(f"{BASE_URL}/token", json=payload, headers=HEADERS, timeout=10)
+        if r_tok.status_code == 200:
+            token = r_tok.json().get("token")
+            return address, token
     except Exception:
         pass
-    return [], None, None
+    return None, None
 
-def read_simple_message(user, domain, msg_id):
+def get_mailtm_messages(token):
     try:
-        url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={user}&domain={domain}&id={msg_id}"
-        r = requests.get(url, headers=REQ_HEADERS, timeout=10)
-        if r.status_code == 200:
-            return r.json()
+        auth_headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
+        res = requests.get(f"{BASE_URL}/messages", headers=auth_headers, timeout=10)
+        if res.status_code == 200:
+            return res.json().get("hydra:member", [])
+    except Exception:
+        pass
+    return []
+
+def get_mailtm_detail(token, msg_id):
+    try:
+        auth_headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
+        res = requests.get(f"{BASE_URL}/messages/{msg_id}", headers=auth_headers, timeout=10)
+        if res.status_code == 200:
+            return res.json()
     except Exception:
         pass
     return {}
@@ -246,20 +278,26 @@ def generate_mail(message):
         )
         return
 
-    new_mail = generate_simple_mail()
+    wait_msg = bot.send_message(user_id, "⏳ Creating temporary inbox...")
+    new_mail, token = create_mailtm()
+
+    if not new_mail or not token:
+        bot.edit_message_text(f"⚠️ Mail server busy. Please try again in 5 seconds.{FOOTER_TEXT}", user_id, wait_msg.message_id)
+        return
 
     if not is_perm:
         cursor.execute(
-            "UPDATE users SET credits = credits - 1, current_email = ? WHERE user_id = ?",
-            (new_mail, user_id)
+            "UPDATE users SET credits = credits - 1, current_email = ?, mail_token = ? WHERE user_id = ?",
+            (new_mail, token, user_id)
         )
     else:
         cursor.execute(
-            "UPDATE users SET current_email = ? WHERE user_id = ?",
-            (new_mail, user_id)
+            "UPDATE users SET current_email = ?, mail_token = ? WHERE user_id = ?",
+            (new_mail, token, user_id)
         )
     conn.commit()
 
+    bot.delete_message(user_id, wait_msg.message_id)
     bot.send_message(
         user_id,
         f"✅ **New Temporary Email Ready!**\n\n"
@@ -278,17 +316,19 @@ def check_inbox(message):
         return
 
     status = get_user_status(user_id)
-    if not status or not status[2]:
+    if not status or not status[2] or not status[3]:
         bot.send_message(user_id, f"⚠️ You haven't generated an email yet! Tap '🎲 Generate Mail'.{FOOTER_TEXT}")
         return
 
-    mail = status[2]
-    msgs, user, domain = check_simple_inbox(mail)
+    mail, token = status[2], status[3]
+    wait_msg = bot.send_message(user_id, "🔄 Fetching messages...")
+    msgs = get_mailtm_messages(token)
+    bot.delete_message(user_id, wait_msg.message_id)
 
     if not msgs:
         bot.send_message(
             user_id,
-            f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo verification codes received yet. Send your OTP and check again."
+            f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo verification messages yet. Send OTP and check again."
             f"{FOOTER_TEXT}",
             parse_mode="Markdown"
         )
@@ -296,17 +336,17 @@ def check_inbox(message):
 
     for item in msgs[:3]:
         m_id = item["id"]
-        detail = read_simple_message(user, domain, m_id)
+        detail = get_mailtm_detail(token, m_id)
         
-        sender = detail.get("from", item.get("from", "Unknown Sender"))
-        subject = detail.get("subject", item.get("subject", "No Subject"))
-        body = detail.get("textBody", detail.get("body", "HTML Message")).strip()
+        sender = detail.get("from", {}).get("address", "Unknown Sender")
+        subject = detail.get("subject", "No Subject")
+        text_body = detail.get("text", detail.get("intro", "No Body Text")).strip()
 
         content = (
             f"📩 **New Message / OTP Received!**\n\n"
             f"👤 **From:** `{sender}`\n"
             f"📝 **Subject:** `{subject}`\n\n"
-            f"📄 **Message:**\n`{body[:800]}`"
+            f"📄 **Message:**\n`{text_body[:800]}`"
             f"{FOOTER_TEXT}"
         )
         bot.send_message(user_id, content, parse_mode="Markdown")
@@ -472,6 +512,7 @@ def process_code_redemption(message):
     conn.commit()
     bot.send_message(user_id, f"🎉 **Code Redeemed Successfully!**\n\nYou received: **{reward}**!{FOOTER_TEXT}", parse_mode="Markdown")
 
+# Admin /gen command: /gen <code> <credits/perm> <max_devices>
 @bot.message_handler(commands=['gen'])
 def generate_voucher_command(message):
     if message.from_user.id != ADMIN_ID:
