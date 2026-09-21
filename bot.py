@@ -25,7 +25,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAGwMfZ8EDCPwPnY4gF5xTVPrcfXWGBWi8A"
+BOT_TOKEN = "8724616175:AAF4wpSATobR1Zcf2XRB2An6Fg_EIqnuRLM"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
