@@ -1,7 +1,4 @@
 import os
-import time
-import random
-import string
 import sqlite3
 import threading
 import requests
@@ -49,14 +46,14 @@ CREATE TABLE IF NOT EXISTS users (
     credits INTEGER DEFAULT 1,
     is_permanent INTEGER DEFAULT 0,
     current_email TEXT DEFAULT NULL,
-    account_token TEXT DEFAULT NULL,
+    session_id TEXT DEFAULT NULL,
     referred_by INTEGER DEFAULT NULL
 )
 """)
 
-# Migration helper for existing databases
+# Safe migration check
 try:
-    cursor.execute("ALTER TABLE users ADD COLUMN account_token TEXT DEFAULT NULL")
+    cursor.execute("ALTER TABLE users ADD COLUMN session_id TEXT DEFAULT NULL")
     conn.commit()
 except Exception:
     pass
@@ -81,9 +78,6 @@ CREATE TABLE IF NOT EXISTS voucher_redemptions (
 conn.commit()
 
 # ================= HELPER FUNCTIONS =================
-def random_string(length=8):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-
 def register_user(user_id, referrer_id=None):
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -144,38 +138,61 @@ def get_main_keyboard(user_id):
     return markup
 
 def get_user_status(user_id):
-    cursor.execute("SELECT credits, is_permanent, current_email, account_token FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT credits, is_permanent, current_email, session_id FROM users WHERE user_id = ?", (user_id,))
     return cursor.fetchone()
 
-# ================= TEMP MAIL ENGINE (MAIL.GW) =================
-def create_temp_mailbox():
-    headers = {"Content-Type": "application/json"}
+# ================= DROPMAIL.ME GRAPHQL ENGINE =================
+DROPMAIL_URL = "https://dropmail.me/api/graphql/web-test-2026"
+
+def create_dropmail_account():
+    query = """
+    mutation {
+        introduceSession {
+            id
+            addresses {
+                address
+            }
+        }
+    }
+    """
     try:
-        d_res = requests.get("https://api.mail.gw/domains", headers=headers, timeout=10)
-        if d_res.status_code != 200:
-            return None, None
-        domains_data = d_res.json().get("hydra:member", [])
-        if not domains_data:
-            return None, None
-        domain = domains_data[0]["domain"]
-        
-        username = f"user_{random_string(8)}"
-        email_address = f"{username}@{domain}"
-        password = f"P@{random_string(10)}"
-
-        reg_payload = {"address": email_address, "password": password}
-        reg_res = requests.post("https://api.mail.gw/accounts", json=reg_payload, headers=headers, timeout=10)
-        if reg_res.status_code not in [200, 201]:
-            return None, None
-
-        token_res = requests.post("https://api.mail.gw/token", json=reg_payload, headers=headers, timeout=10)
-        if token_res.status_code != 200:
-            return None, None
-        
-        token = token_res.json().get("token")
-        return email_address, token
+        res = requests.post(DROPMAIL_URL, json={"query": query}, headers={"Content-Type": "application/json"}, timeout=12)
+        if res.status_code == 200:
+            data = res.json().get("data", {}).get("introduceSession", {})
+            session_id = data.get("id")
+            addresses = data.get("addresses", [])
+            if addresses and session_id:
+                return addresses[0]["address"], session_id
     except Exception:
-        return None, None
+        pass
+    return None, None
+
+def fetch_dropmail_messages(session_id):
+    query = """
+    query ($id: ID!) {
+        session(id: $id) {
+            mails {
+                fromAddr
+                headerSubject
+                text
+            }
+        }
+    }
+    """
+    try:
+        res = requests.post(
+            DROPMAIL_URL,
+            json={"query": query, "variables": {"id": session_id}},
+            headers={"Content-Type": "application/json"},
+            timeout=12
+        )
+        if res.status_code == 200:
+            data = res.json().get("data", {}).get("session", {})
+            if data and "mails" in data:
+                return data["mails"]
+    except Exception:
+        pass
+    return []
 
 # ================= START & VERIFICATION =================
 @bot.message_handler(commands=['start'])
@@ -252,8 +269,8 @@ def generate_mail(message):
         )
         return
 
-    wait_msg = bot.send_message(user_id, "⏳ Generating temporary mailbox...")
-    new_mail, token = create_temp_mailbox()
+    wait_msg = bot.send_message(user_id, "⏳ Generating active mailbox...")
+    new_mail, session_id = create_dropmail_account()
 
     if not new_mail:
         bot.edit_message_text(f"⚠️ Mail service is temporarily busy. Please tap again in a moment.{FOOTER_TEXT}", user_id, wait_msg.message_id)
@@ -261,13 +278,13 @@ def generate_mail(message):
 
     if not is_perm:
         cursor.execute(
-            "UPDATE users SET credits = credits - 1, current_email = ?, account_token = ? WHERE user_id = ?",
-            (new_mail, token, user_id)
+            "UPDATE users SET credits = credits - 1, current_email = ?, session_id = ? WHERE user_id = ?",
+            (new_mail, session_id, user_id)
         )
     else:
         cursor.execute(
-            "UPDATE users SET current_email = ?, account_token = ? WHERE user_id = ?",
-            (new_mail, token, user_id)
+            "UPDATE users SET current_email = ?, session_id = ? WHERE user_id = ?",
+            (new_mail, session_id, user_id)
         )
     conn.commit()
 
@@ -294,39 +311,28 @@ def check_inbox(message):
         bot.send_message(user_id, f"⚠️ You haven't generated an email yet! Tap '🎲 Generate Mail'.{FOOTER_TEXT}")
         return
 
-    mail, token = status[2], status[3]
-    headers = {"Authorization": f"Bearer {token}"}
+    mail, session_id = status[2], status[3]
+    mails = fetch_dropmail_messages(session_id)
 
-    try:
-        res = requests.get("https://api.mail.gw/messages", headers=headers, timeout=10)
-        msgs_data = res.json().get("hydra:member", [])
-    except Exception:
-        bot.send_message(user_id, f"⚠️ Error fetching inbox. Please try again.{FOOTER_TEXT}")
-        return
-
-    if not msgs_data:
+    if not mails:
         bot.send_message(
             user_id,
-            f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo incoming messages yet. Send OTP and check again."
+            f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo verification codes received yet. Send your OTP and check again."
             f"{FOOTER_TEXT}",
             parse_mode="Markdown"
         )
         return
 
-    for item in msgs_data[:3]:
-        m_id = item["id"]
-        detail_res = requests.get(f"https://api.mail.gw/messages/{m_id}", headers=headers, timeout=10)
-        detail = detail_res.json()
-        
-        sender = detail.get("from", {}).get("address", "Unknown Sender")
-        subject = detail.get("subject", "No Subject")
-        text_body = detail.get("text", detail.get("intro", "No Body Text")).strip()
+    for item in mails[:3]:
+        sender = item.get("fromAddr", "Unknown Sender")
+        subject = item.get("headerSubject", "No Subject")
+        body = item.get("text", "No Body Text").strip()
 
         content = (
             f"📩 **New Message / OTP Received!**\n\n"
             f"👤 **From:** `{sender}`\n"
             f"📝 **Subject:** `{subject}`\n\n"
-            f"📄 **Message:**\n`{text_body[:800]}`"
+            f"📄 **Message:**\n`{body[:800]}`"
             f"{FOOTER_TEXT}"
         )
         bot.send_message(user_id, content, parse_mode="Markdown")
@@ -522,7 +528,7 @@ def generate_voucher_command(message):
 
     cursor.execute(
         "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_uses, used_count) VALUES (?, ?, ?, ?, 0)",
-     (code, cred_amt, is_perm, max_uses)
+        (code, cred_amt, is_perm, max_uses)
     )
     conn.commit()
 
