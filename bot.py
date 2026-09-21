@@ -1,4 +1,6 @@
 import os
+import random
+import string
 import sqlite3
 import threading
 import requests
@@ -21,7 +23,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAFEDJjezwGZvTK14Or5blOBoCOCg8aoSwY"
+BOT_TOKEN = "8724616175:AAGO_AfXv8-ubRmCWQwrlYn8d3O37MZHoLE"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
@@ -51,12 +53,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-try:
-    cursor.execute("ALTER TABLE users ADD COLUMN session_id TEXT DEFAULT NULL")
-    conn.commit()
-except Exception:
-    pass
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vouchers (
     code TEXT PRIMARY KEY,
@@ -77,6 +73,9 @@ CREATE TABLE IF NOT EXISTS voucher_redemptions (
 conn.commit()
 
 # ================= HELPER FUNCTIONS =================
+def random_str(length=8):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
 def register_user(user_id, referrer_id=None):
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -140,58 +139,37 @@ def get_user_status(user_id):
     cursor.execute("SELECT credits, is_permanent, current_email, session_id FROM users WHERE user_id = ?", (user_id,))
     return cursor.fetchone()
 
-# ================= DROPMAIL.ME GRAPHQL ENGINE =================
-DROPMAIL_URL = "https://dropmail.me/api/graphql/web-test-2026"
+# ================= 1SECMAIL MULTI-DOMAIN ENGINE =================
+DOMAINS = ["1secmail.com", "1secmail.net", "1secmail.org", "kzccv.com", "qiott.com"]
+REQ_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+}
 
-def create_dropmail_account():
-    query = """
-    mutation {
-        introduceSession {
-            id
-            addresses {
-                address
-            }
-        }
-    }
-    """
+def generate_simple_mail():
+    user = f"ox_{random_str(7)}"
+    domain = random.choice(DOMAINS)
+    return f"{user}@{domain}"
+
+def check_simple_inbox(email_address):
     try:
-        res = requests.post(DROPMAIL_URL, json={"query": query}, headers={"Content-Type": "application/json"}, timeout=12)
-        if res.status_code == 200:
-            data = res.json().get("data", {}).get("introduceSession", {})
-            session_id = data.get("id")
-            addresses = data.get("addresses", [])
-            if addresses and session_id:
-                return addresses[0]["address"], session_id
+        user, domain = email_address.split("@")
+        url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={user}&domain={domain}"
+        r = requests.get(url, headers=REQ_HEADERS, timeout=10)
+        if r.status_code == 200:
+            return r.json(), user, domain
     except Exception:
         pass
-    return None, None
+    return [], None, None
 
-def fetch_dropmail_messages(session_id):
-    query = """
-    query ($id: ID!) {
-        session(id: $id) {
-            mails {
-                fromAddr
-                headerSubject
-                text
-            }
-        }
-    }
-    """
+def read_simple_message(user, domain, msg_id):
     try:
-        res = requests.post(
-            DROPMAIL_URL,
-            json={"query": query, "variables": {"id": session_id}},
-            headers={"Content-Type": "application/json"},
-            timeout=12
-        )
-        if res.status_code == 200:
-            data = res.json().get("data", {}).get("session", {})
-            if data and "mails" in data:
-                return data["mails"]
+        url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={user}&domain={domain}&id={msg_id}"
+        r = requests.get(url, headers=REQ_HEADERS, timeout=10)
+        if r.status_code == 200:
+            return r.json()
     except Exception:
         pass
-    return []
+    return {}
 
 # ================= START & VERIFICATION =================
 @bot.message_handler(commands=['start'])
@@ -268,26 +246,20 @@ def generate_mail(message):
         )
         return
 
-    wait_msg = bot.send_message(user_id, "⏳ Generating active mailbox...")
-    new_mail, session_id = create_dropmail_account()
-
-    if not new_mail:
-        bot.edit_message_text(f"⚠️ Mail service is temporarily busy. Please tap again in a moment.{FOOTER_TEXT}", user_id, wait_msg.message_id)
-        return
+    new_mail = generate_simple_mail()
 
     if not is_perm:
         cursor.execute(
-            "UPDATE users SET credits = credits - 1, current_email = ?, session_id = ? WHERE user_id = ?",
-            (new_mail, session_id, user_id)
+            "UPDATE users SET credits = credits - 1, current_email = ? WHERE user_id = ?",
+            (new_mail, user_id)
         )
     else:
         cursor.execute(
-            "UPDATE users SET current_email = ?, session_id = ? WHERE user_id = ?",
-            (new_mail, session_id, user_id)
+            "UPDATE users SET current_email = ? WHERE user_id = ?",
+            (new_mail, user_id)
         )
     conn.commit()
 
-    bot.delete_message(user_id, wait_msg.message_id)
     bot.send_message(
         user_id,
         f"✅ **New Temporary Email Ready!**\n\n"
@@ -306,14 +278,14 @@ def check_inbox(message):
         return
 
     status = get_user_status(user_id)
-    if not status or not status[2] or not status[3]:
+    if not status or not status[2]:
         bot.send_message(user_id, f"⚠️ You haven't generated an email yet! Tap '🎲 Generate Mail'.{FOOTER_TEXT}")
         return
 
-    mail, session_id = status[2], status[3]
-    mails = fetch_dropmail_messages(session_id)
+    mail = status[2]
+    msgs, user, domain = check_simple_inbox(mail)
 
-    if not mails:
+    if not msgs:
         bot.send_message(
             user_id,
             f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo verification codes received yet. Send your OTP and check again."
@@ -322,10 +294,13 @@ def check_inbox(message):
         )
         return
 
-    for item in mails[:3]:
-        sender = item.get("fromAddr", "Unknown Sender")
-        subject = item.get("headerSubject", "No Subject")
-        body = item.get("text", "No Body Text").strip()
+    for item in msgs[:3]:
+        m_id = item["id"]
+        detail = read_simple_message(user, domain, m_id)
+        
+        sender = detail.get("from", item.get("from", "Unknown Sender"))
+        subject = detail.get("subject", item.get("subject", "No Subject"))
+        body = detail.get("textBody", detail.get("body", "HTML Message")).strip()
 
         content = (
             f"📩 **New Message / OTP Received!**\n\n"
@@ -497,7 +472,6 @@ def process_code_redemption(message):
     conn.commit()
     bot.send_message(user_id, f"🎉 **Code Redeemed Successfully!**\n\nYou received: **{reward}**!{FOOTER_TEXT}", parse_mode="Markdown")
 
-# Admin /gen command: /gen <code> <credits/perm> <max_devices>
 @bot.message_handler(commands=['gen'])
 def generate_voucher_command(message):
     if message.from_user.id != ADMIN_ID:
@@ -526,7 +500,7 @@ def generate_voucher_command(message):
     cred_amt = 0 if is_perm else int(cred_type)
 
     cursor.execute(
-        "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_users, used_count) VALUES (?, ?, ?, ?, 0)",
+        "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_uses, used_count) VALUES (?, ?, ?, ?, 0)",
         (code, cred_amt, is_perm, max_uses)
     )
     conn.commit()
