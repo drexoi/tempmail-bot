@@ -1,13 +1,15 @@
 import os
 import random
 import string
+import html
 import sqlite3
 import threading
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telebot import TeleBot, types
+import telebot
+from telebot import types
 
-# ================= DUMMY WEB SERVER (RENDER & UPTIMEROBOT) =================
+# ================= DUMMY WEB SERVER (RENDER KEEP-ALIVE) =================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -23,20 +25,21 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAFw23RyOhoqCJEspO0O5RVnM_BvWXnyX3s"
+BOT_TOKEN = "8724616175:AAGwMfZ8EDCPwPnY4gF5xTVPrcfXWGBWi8A"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
 CHANNELS = [
-    {"chat_id": -1004447562202, "link": "https://t.me/+cJt33a-UDCw5YmVl", "name": "Join 1"},
-    {"chat_id": -1004374951317, "link": "https://t.me/+HkOcx5kbh01iZTE1", "name": "Join 2"},
-    {"chat_id": -1004291249317, "link": "https://t.me/OxRehanCyber", "name": "Join 3"},
-    {"chat_id": -1003782903063, "link": "https://t.me/+852hkOgj0UNlZGU9", "name": "Join 4"}
+    {"chat_id": -1004447562202, "link": "https://t.me/+cJt33a-UDCw5YmVl"},
+    {"chat_id": -1004374951317, "link": "https://t.me/+HkOcx5kbh01iZTE1"},
+    {"chat_id": -1004291249317, "link": "https://t.me/OxRehanCyber"},
+    {"chat_id": -1003782903063, "link": "https://t.me/+852hkOgj0UNlZGU9"}
 ]
 
 FOOTER_TEXT = "\n\nany issues / feedback @OxRehann"
+API_BASE = "https://www.1secmail.com/api/v1/"
 
-bot = TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # ================= DATABASE SETUP =================
 conn = sqlite3.connect("tempmail_database.db", check_same_thread=False)
@@ -48,16 +51,9 @@ CREATE TABLE IF NOT EXISTS users (
     credits INTEGER DEFAULT 1,
     is_permanent INTEGER DEFAULT 0,
     current_email TEXT DEFAULT NULL,
-    mail_token TEXT DEFAULT NULL,
     referred_by INTEGER DEFAULT NULL
 )
 """)
-
-try:
-    cursor.execute("ALTER TABLE users ADD COLUMN mail_token TEXT DEFAULT NULL")
-    conn.commit()
-except Exception:
-    pass
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -79,9 +75,6 @@ CREATE TABLE IF NOT EXISTS voucher_redemptions (
 conn.commit()
 
 # ================= HELPER FUNCTIONS =================
-def random_str(length=8):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-
 def register_user(user_id, referrer_id=None):
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -127,85 +120,37 @@ def get_force_sub_markup():
 
 def get_main_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn_gen = types.KeyboardButton("🎲 Generate Mail")
-    btn_inbox = types.KeyboardButton("📬 Check Inbox / OTP")
-    btn_balance = types.KeyboardButton("💳 Balance & Info")
-    btn_buy = types.KeyboardButton("💰 Buy Credits")
-    btn_refer = types.KeyboardButton("👥 Refer & Earn")
-    btn_redeem = types.KeyboardButton("🎁 Redeem Code")
-    markup.add(btn_gen, btn_inbox)
-    markup.add(btn_balance, btn_buy)
-    markup.add(btn_refer, btn_redeem)
-    
+    b1 = types.KeyboardButton("📧 Generate Email")
+    b2 = types.KeyboardButton("📬 Check Inbox")
+    b3 = types.KeyboardButton("ℹ️ Current Mail")
+    b4 = types.KeyboardButton("💰 Buy Credits")
+    b5 = types.KeyboardButton("👥 Refer & Earn")
+    b6 = types.KeyboardButton("🎁 Redeem Code")
+    markup.add(b1, b2)
+    markup.add(b3, b4)
+    markup.add(b5, b6)
     if user_id == ADMIN_ID:
         markup.add(types.KeyboardButton("👑 Admin Panel"))
     return markup
 
-def get_user_status(user_id):
-    cursor.execute("SELECT credits, is_permanent, current_email, mail_token FROM users WHERE user_id = ?", (user_id,))
-    return cursor.fetchone()
-
-# ================= MAIL.TM API IMPLEMENTATION =================
-BASE_URL = "https://api.mail.tm"
-HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json"
-}
-
-def create_mailtm():
+def get_domains():
     try:
-        r_dom = requests.get(f"{BASE_URL}/domains", headers=HEADERS, timeout=10)
-        domains_list = r_dom.json().get("hydra:member", [])
-        if not domains_list:
-            return None, None
-        domain = domains_list[0]["domain"]
-
-        username = f"user_{random_str(8)}"
-        address = f"{username}@{domain}"
-        password = f"P@{random_str(10)}"
-        payload = {"address": address, "password": password}
-
-        r_acc = requests.post(f"{BASE_URL}/accounts", json=payload, headers=HEADERS, timeout=10)
-        if r_acc.status_code not in [200, 201]:
-            return None, None
-
-        r_tok = requests.post(f"{BASE_URL}/token", json=payload, headers=HEADERS, timeout=10)
-        if r_tok.status_code == 200:
-            token = r_tok.json().get("token")
-            return address, token
-    except Exception:
-        pass
-    return None, None
-
-def get_mailtm_messages(token):
-    try:
-        auth_headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}"
-        }
-        res = requests.get(f"{BASE_URL}/messages", headers=auth_headers, timeout=10)
-        if res.status_code == 200:
-            return res.json().get("hydra:member", [])
-    except Exception:
-        pass
-    return []
-
-def get_mailtm_detail(token, msg_id):
-    try:
-        auth_headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}"
-        }
-        res = requests.get(f"{BASE_URL}/messages/{msg_id}", headers=auth_headers, timeout=10)
+        res = requests.get(f"{API_BASE}?action=getDomainList", timeout=5)
         if res.status_code == 200:
             return res.json()
     except Exception:
         pass
-    return {}
+    return ["1secmail.com", "1secmail.net", "1secmail.org"]
 
-# ================= START & VERIFICATION =================
-@bot.message_handler(commands=['start'])
-def start_handler(message):
+def generate_temp_email():
+    domains = get_domains()
+    login = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    domain = random.choice(domains)
+    return login, domain
+
+# ================= START COMMAND =================
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
     user_id = message.from_user.id
     args = message.text.split()
     referrer_id = None
@@ -217,29 +162,25 @@ def start_handler(message):
     if not is_subscribed(user_id):
         bot.send_message(
             user_id,
-            "🔒 **Access Locked!**\n\n"
-            "Please join our 4 official channels below to unlock the bot and claim your free trial credit:",
-            reply_markup=get_force_sub_markup()
+            "🔒 **Access Locked!**\n\nPlease join our 4 official channels to use this bot:",
+            reply_markup=get_force_sub_markup(),
+            parse_mode="Markdown"
         )
         return
 
-    send_dashboard(user_id)
+    cursor.execute("SELECT credits, is_permanent, current_email FROM users WHERE user_id = ?", (user_id,))
+    data = cursor.fetchone()
+    credits, is_perm, active_email = data if data else (0, 0, None)
+    status_str = "🌟 Permanent Access" if is_perm else f"⚡ {credits} Credits"
 
-def send_dashboard(user_id):
-    status = get_user_status(user_id)
-    credits = status[0] if status else 0
-    is_perm = status[1] if status else 0
-    mail = status[2] if status and status[2] else "None (Tap 'Generate Mail')"
-    perm_status = "🌟 Permanent Access Active" if is_perm else f"⚡ {credits} Credits Available"
-
-    text = (
-        "🚀 **Welcome to Professional Temp Mail Bot!**\n\n"
-        f"📧 **Current Email:** `{mail}`\n"
-        f"💎 **Account Plan:** {perm_status}\n\n"
-        "Generate throwaway email addresses and fetch OTP/Verification codes instantly."
+    welcome_text = (
+        "👋 **Temp Mail Bot me aapka swagat hai!**\n\n"
+        f"💎 **Account Plan:** {status_str}\n"
+        f"📧 **Active Email:** `{active_email or 'None'}`\n\n"
+        "Bina registration ke temporary emails create karein aur instant verification OTP receive karein."
         f"{FOOTER_TEXT}"
     )
-    bot.send_message(user_id, text, reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_channels")
 def verify_channels_callback(call):
@@ -249,164 +190,179 @@ def verify_channels_callback(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
             pass
-        send_dashboard(user_id)
+        bot.send_message(user_id, "✅ Channels verified successfully!", reply_markup=get_main_keyboard(user_id))
     else:
-        bot.answer_callback_query(
-            call.id,
-            "⚠️ Access Denied! Please join all 4 required channels before verifying.",
-            show_alert=True
-        )
+        bot.answer_callback_query(call.id, "⚠️ Please join all 4 channels first!", show_alert=True)
 
-# ================= TEMP MAIL ACTIONS =================
-@bot.message_handler(func=lambda msg: msg.text == "🎲 Generate Mail")
-def generate_mail(message):
+# ================= MAIN BUTTON HANDLER =================
+@bot.message_handler(content_types=['text'])
+def handle_text_buttons(message):
+    chat_id = message.chat.id
     user_id = message.from_user.id
+    text = message.text.strip()
+
     if not is_subscribed(user_id):
-        bot.send_message(user_id, "⚠️ Join channels first!", reply_markup=get_force_sub_markup())
+        bot.send_message(chat_id, "🔒 Join channels first to unlock:", reply_markup=get_force_sub_markup())
         return
 
-    status = get_user_status(user_id)
-    if not status:
-        return
-    credits, is_perm, _, _ = status
+    # 1. Generate Email
+    if text == "📧 Generate Email":
+        cursor.execute("SELECT credits, is_permanent FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        credits, is_perm = row if row else (0, 0)
 
-    if not is_perm and credits < 1:
-        bot.send_message(
-            user_id,
-            f"❌ **Insufficient Credits!**\n\nYou need 1 Credit to generate an email. Refer friends or buy credits.{FOOTER_TEXT}",
-            parse_mode="Markdown"
-        )
-        return
+        if not is_perm and credits < 1:
+            bot.send_message(chat_id, f"❌ **Insufficient Credits!**\n\nYou need 1 Credit to generate an email. Refer friends or buy credits.{FOOTER_TEXT}", parse_mode="Markdown")
+            return
 
-    wait_msg = bot.send_message(user_id, "⏳ Creating temporary inbox...")
-    new_mail, token = create_mailtm()
+        login, domain = generate_temp_email()
+        full_email = f"{login}@{domain}"
 
-    if not new_mail or not token:
-        bot.edit_message_text(f"⚠️ Mail server busy. Please try again in 5 seconds.{FOOTER_TEXT}", user_id, wait_msg.message_id)
-        return
+        if not is_perm:
+            cursor.execute("UPDATE users SET credits = credits - 1, current_email = ? WHERE user_id = ?", (full_email, user_id))
+        else:
+            cursor.execute("UPDATE users SET current_email = ? WHERE user_id = ?", (full_email, user_id))
+        conn.commit()
 
-    if not is_perm:
-        cursor.execute(
-            "UPDATE users SET credits = credits - 1, current_email = ?, mail_token = ? WHERE user_id = ?",
-            (new_mail, token, user_id)
-        )
-    else:
-        cursor.execute(
-            "UPDATE users SET current_email = ?, mail_token = ? WHERE user_id = ?",
-            (new_mail, token, user_id)
-        )
-    conn.commit()
-
-    bot.delete_message(user_id, wait_msg.message_id)
-    bot.send_message(
-        user_id,
-        f"✅ **New Temporary Email Ready!**\n\n"
-        f"📧 `{new_mail}`\n\n"
-        "*(Tap the email address above to copy it)*\n\n"
-        "Send your OTP or confirmation to this address, then click **📬 Check Inbox / OTP**."
-        f"{FOOTER_TEXT}",
-        parse_mode="Markdown"
-    )
-
-@bot.message_handler(func=lambda msg: msg.text == "📬 Check Inbox / OTP")
-def check_inbox(message):
-    user_id = message.from_user.id
-    if not is_subscribed(user_id):
-        bot.send_message(user_id, "⚠️ Join channels first!", reply_markup=get_force_sub_markup())
-        return
-
-    status = get_user_status(user_id)
-    if not status or not status[2] or not status[3]:
-        bot.send_message(user_id, f"⚠️ You haven't generated an email yet! Tap '🎲 Generate Mail'.{FOOTER_TEXT}")
-        return
-
-    mail, token = status[2], status[3]
-    wait_msg = bot.send_message(user_id, "🔄 Fetching messages...")
-    msgs = get_mailtm_messages(token)
-    bot.delete_message(user_id, wait_msg.message_id)
-
-    if not msgs:
-        bot.send_message(
-            user_id,
-            f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo verification messages yet. Send OTP and check again."
-            f"{FOOTER_TEXT}",
-            parse_mode="Markdown"
-        )
-        return
-
-    for item in msgs[:3]:
-        m_id = item["id"]
-        detail = get_mailtm_detail(token, m_id)
-        
-        sender = detail.get("from", {}).get("address", "Unknown Sender")
-        subject = detail.get("subject", "No Subject")
-        text_body = detail.get("text", detail.get("intro", "No Body Text")).strip()
-
-        content = (
-            f"📩 **New Message / OTP Received!**\n\n"
-            f"👤 **From:** `{sender}`\n"
-            f"📝 **Subject:** `{subject}`\n\n"
-            f"📄 **Message:**\n`{text_body[:800]}`"
+        resp = (
+            f"🎉 **Aapka Temporary Email ready hai:**\n\n"
+            f"`{full_email}`\n\n"
+            f"_(Click karke copy karein. Verification mail aane par '📬 Check Inbox' dabayein.)_"
             f"{FOOTER_TEXT}"
         )
-        bot.send_message(user_id, content, parse_mode="Markdown")
+        bot.send_message(chat_id, resp, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda msg: msg.text == "💳 Balance & Info")
-def balance_info(message):
-    user_id = message.from_user.id
-    status = get_user_status(user_id)
-    credits, is_perm, mail, _ = status
-    perm = "Yes (Lifetime Unlimited)" if is_perm else "No"
-    bot_info = bot.get_me().username
-    
-    cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
-    total_refs = cursor.fetchone()[0]
+    # 2. Check Inbox
+    elif text == "📬 Check Inbox":
+        cursor.execute("SELECT current_email FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            bot.send_message(chat_id, f"❌ Pehle **📧 Generate Email** par click karke ek email create karein.{FOOTER_TEXT}")
+            return
 
-    text = (
-        f"📊 **Your Account Summary:**\n\n"
-        f"🆔 **User ID:** `{user_id}`\n"
-        f"💎 **Credits Balance:** `{credits}`\n"
-        f"🌟 **Permanent Access:** `{perm}`\n"
-        f"👥 **Total Referrals:** `{total_refs}`\n"
-        f"📧 **Active Mail:** `{mail or 'None'}`\n\n"
-        f"🔗 **Your Referral Link:**\n`https://t.me/{bot_info}?start={user_id}`"
-        f"{FOOTER_TEXT}"
-    )
-    bot.send_message(user_id, text, parse_mode="Markdown")
+        full_email = row[0]
+        login, domain = full_email.split("@")
+        inbox_url = f"{API_BASE}?action=getMessages&login={login}&domain={domain}"
 
-@bot.message_handler(func=lambda msg: msg.text == "👥 Refer & Earn")
-def refer_earn(message):
-    user_id = message.from_user.id
-    bot_info = bot.get_me().username
-    link = f"https://t.me/{bot_info}?start={user_id}"
-    bot.send_message(
-        user_id,
-        f"👥 **Refer & Earn Program!**\n\n"
-        "Invite your friends to use this bot and receive **+2 Credits** per successful invite!\n\n"
-        f"🔗 **Your Referral Link:**\n`{link}`"
-        f"{FOOTER_TEXT}",
-        parse_mode="Markdown"
-    )
+        try:
+            res = requests.get(inbox_url, timeout=10).json()
+            if not res:
+                bot.send_message(
+                    chat_id, 
+                    f"📭 **Inbox Khali Hai!**\n\nEmail: `{full_email}`\nAbhi tak koi naya message nahi aaya."
+                    f"{FOOTER_TEXT}", 
+                    parse_mode="Markdown"
+                )
+                return
 
-# ================= BUY & PAYMENT WORKFLOW =================
-@bot.message_handler(func=lambda msg: msg.text == "💰 Buy Credits")
-def buy_credits_menu(message):
-    user_id = message.from_user.id
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("⚡ ₹9 Plan (99 Credits)", callback_data="buy_9"),
-        types.InlineKeyboardButton("👑 ₹29 Plan (Permanent Access)", callback_data="buy_29")
-    )
-    bot.send_message(
-        user_id,
-        "💰 **Choose Your Plan:**\n\n"
-        "• **Starter:** ₹9 for 99 Credits\n"
-        "• **VIP:** ₹29 for Permanent Lifetime Access (Unlimited)"
-        f"{FOOTER_TEXT}",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
+            markup = types.InlineKeyboardMarkup()
+            summary = f"📬 **Inbox Messages ({len(res)}):**\n\n"
+            
+            for item in res[:10]:
+                mail_id = item.get("id")
+                from_user = item.get("from", "Unknown")
+                subject = item.get("subject", "No Subject")
+                date = item.get("date", "")
 
+                summary += f"🔹 **From:** `{from_user}`\n**Subject:** {html.escape(subject)}\n**Date:** {date}\n\n"
+                btn = types.InlineKeyboardButton(f"📖 Read: {subject[:20]}...", callback_data=f"read_{mail_id}")
+                markup.add(btn)
+
+            bot.send_message(chat_id, summary, parse_mode="Markdown", reply_markup=markup)
+
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ Inbox check karne me error aaya: {str(e)}{FOOTER_TEXT}")
+
+    # 3. Current Mail
+    elif text == "ℹ️ Current Mail":
+        cursor.execute("SELECT current_email, credits, is_permanent FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        email = row[0] if row and row[0] else "None (Tap '📧 Generate Email')"
+        creds = "Permanent" if row and row[2] else f"{row[1]} Credits"
+        bot.send_message(chat_id, f"📧 **Active Email:** `{email}`\n💎 **Balance:** {creds}{FOOTER_TEXT}", parse_mode="Markdown")
+
+    # 4. Buy Credits
+    elif text == "💰 Buy Credits":
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("⚡ ₹9 Plan (99 Credits)", callback_data="buy_9"),
+            types.InlineKeyboardButton("👑 ₹29 Plan (Permanent Access)", callback_data="buy_29")
+        )
+        bot.send_message(
+            chat_id,
+            f"💰 **Choose Your Plan:**\n\n• **₹9** = 99 Credits\n• **₹29** = Permanent Lifetime Access{FOOTER_TEXT}",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+    # 5. Refer & Earn
+    elif text == "👥 Refer & Earn":
+        bot_uname = bot.get_me().username
+        link = f"https://t.me/{bot_uname}?start={user_id}"
+        bot.send_message(
+            chat_id,
+            f"👥 **Refer & Earn Program!**\n\nInvite friends and receive **+2 Credits** per successful join!\n\n🔗 **Link:**\n`{link}`{FOOTER_TEXT}",
+            parse_mode="Markdown"
+        )
+
+    # 6. Redeem Code
+    elif text == "🎁 Redeem Code":
+        msg = bot.send_message(chat_id, f"🎁 Please enter your voucher code below:{FOOTER_TEXT}")
+        bot.register_next_step_handler(msg, process_code_redemption)
+
+    # 7. Admin Panel
+    elif text == "👑 Admin Panel" and user_id == ADMIN_ID:
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total = cursor.fetchone()[0]
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("📢 Broadcast to All Users", callback_data="btn_admin_bc"),
+            types.InlineKeyboardButton("🎟️ Voucher Guide (/gen)", callback_data="btn_admin_gen_info")
+        )
+        bot.send_message(ADMIN_ID, f"👑 **Admin Panel**\n\nTotal Users: `{total}`\nUPI: `{UPI_ID}`", reply_markup=markup, parse_mode="Markdown")
+
+# ================= READ EMAIL CONTENT =================
+@bot.callback_query_handler(func=lambda call: call.data.startswith("read_"))
+def read_single_mail(call):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    mail_id = call.data.split("_")[1]
+
+    cursor.execute("SELECT current_email FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        bot.answer_callback_query(call.id, "Session expired, please regenerate mail.")
+        return
+
+    login, domain = row[0].split("@")
+    read_url = f"{API_BASE}?action=readMessage&login={login}&domain={domain}&id={mail_id}"
+
+    try:
+        data = requests.get(read_url, timeout=10).json()
+        subject = data.get("subject", "No Subject")
+        sender = data.get("from", "Unknown")
+        date = data.get("date", "")
+        text_body = data.get("textBody", "").strip() or data.get("body", "No Text Content")
+
+        if len(text_body) > 3500:
+            text_body = text_body[:3500] + "\n\n...[Truncated]"
+
+        full_msg = (
+            f"📨 **Subject:** {subject}\n"
+            f"👤 **From:** `{sender}`\n"
+            f"🕒 **Date:** {date}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{text_body}"
+            f"{FOOTER_TEXT}"
+        )
+        bot.answer_callback_query(call.id)
+        bot.send_message(chat_id, full_msg)
+
+    except Exception as e:
+        bot.answer_callback_query(call.id, "Mail open nahi ho paya!")
+        bot.send_message(chat_id, f"⚠️ Error: {str(e)}")
+
+# ================= BUY WORKFLOW & APPROVALS =================
 @bot.callback_query_handler(func=lambda call: call.data in ["buy_9", "buy_29"])
 def initiate_payment(call):
     user_id = call.from_user.id
@@ -414,7 +370,7 @@ def initiate_payment(call):
     
     text = (
         f"💳 **Payment Request: {plan_name}**\n\n"
-        f"Send the payment to UPI ID:\n👉 `{UPI_ID}`\n\n"
+        f"Send payment to UPI ID:\n👉 `{UPI_ID}`\n\n"
         "After paying, reply directly with your **Payment Screenshot or UTR Number**."
         f"{FOOTER_TEXT}"
     )
@@ -438,12 +394,7 @@ def process_payment_proof(message, plan_name):
     
     bot.send_message(ADMIN_ID, admin_note, parse_mode="Markdown")
     bot.copy_message(ADMIN_ID, user_id, message.message_id, reply_markup=markup)
-    
-    bot.send_message(
-        user_id,
-        f"✅ **Payment Submitted!**\n\nYour proof has been forwarded to the admin. Your plan will activate within minutes upon verification.{FOOTER_TEXT}",
-        parse_mode="Markdown"
-    )
+    bot.send_message(user_id, f"✅ **Payment Submitted!**\n\nYour proof is sent to admin for verification.{FOOTER_TEXT}", parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("app_9_", "app_29_", "rej_")))
 def handle_admin_decision(call):
@@ -456,27 +407,21 @@ def handle_admin_decision(call):
         cursor.execute("UPDATE users SET credits = credits + 99 WHERE user_id = ?", (target_uid,))
         conn.commit()
         bot.edit_message_caption("✅ Approved: ₹9 Plan (99 Credits added).", ADMIN_ID, call.message.message_id)
-        bot.send_message(target_uid, f"🎉 **Payment Verified!**\n\n99 Credits have been credited to your balance.{FOOTER_TEXT}", parse_mode="Markdown")
+        bot.send_message(target_uid, f"🎉 **Payment Verified!**\n\n99 Credits added to your account.{FOOTER_TEXT}", parse_mode="Markdown")
 
     elif action.startswith("app_29_"):
         target_uid = int(action.replace("app_29_", ""))
         cursor.execute("UPDATE users SET is_permanent = 1 WHERE user_id = ?", (target_uid,))
         conn.commit()
-        bot.edit_message_caption("🌟 Approved: ₹29 Permanent VIP Access granted.", ADMIN_ID, call.message.message_id)
-        bot.send_message(target_uid, f"👑 **Payment Verified!**\n\nPermanent Lifetime Access is now active on your account!{FOOTER_TEXT}", parse_mode="Markdown")
+        bot.edit_message_caption("🌟 Approved: ₹29 Permanent Access granted.", ADMIN_ID, call.message.message_id)
+        bot.send_message(target_uid, f"👑 **Payment Verified!**\n\nPermanent Lifetime Access is active on your account!{FOOTER_TEXT}", parse_mode="Markdown")
 
     elif action.startswith("rej_"):
         target_uid = int(action.replace("rej_", ""))
         bot.edit_message_caption("❌ Rejected.", ADMIN_ID, call.message.message_id)
-        bot.send_message(target_uid, f"❌ **Payment Rejected!**\n\nThe submitted proof was invalid or could not be verified. Contact @OxRehann.{FOOTER_TEXT}", parse_mode="Markdown")
+        bot.send_message(target_uid, f"❌ **Payment Rejected!**\n\nInvalid proof or transaction not found. Contact @OxRehann.{FOOTER_TEXT}", parse_mode="Markdown")
 
 # ================= REDEEM & /GEN WORKFLOW =================
-@bot.message_handler(func=lambda msg: msg.text == "🎁 Redeem Code")
-def redeem_prompt(message):
-    user_id = message.from_user.id
-    msg = bot.send_message(user_id, f"🎁 Please send your redeem code below:{FOOTER_TEXT}")
-    bot.register_next_step_handler(msg, process_code_redemption)
-
 def process_code_redemption(message):
     user_id = message.from_user.id
     code = message.text.strip()
@@ -496,7 +441,7 @@ def process_code_redemption(message):
         return
 
     if used_count >= max_uses:
-        bot.send_message(user_id, f"❌ This voucher code has expired (usage limit reached).{FOOTER_TEXT}")
+        bot.send_message(user_id, f"❌ Code expired (usage limit reached).{FOOTER_TEXT}")
         return
 
     cursor.execute("INSERT INTO voucher_redemptions (user_id, code) VALUES (?, ?)", (user_id, code))
@@ -510,9 +455,8 @@ def process_code_redemption(message):
         reward = f"{credits} Credits"
 
     conn.commit()
-    bot.send_message(user_id, f"🎉 **Code Redeemed Successfully!**\n\nYou received: **{reward}**!{FOOTER_TEXT}", parse_mode="Markdown")
+    bot.send_message(user_id, f"🎉 **Code Redeemed!**\n\nYou received: **{reward}**!{FOOTER_TEXT}", parse_mode="Markdown")
 
-# Admin /gen command: /gen <code> <credits/perm> <max_devices>
 @bot.message_handler(commands=['gen'])
 def generate_voucher_command(message):
     if message.from_user.id != ADMIN_ID:
@@ -520,13 +464,7 @@ def generate_voucher_command(message):
 
     parts = message.text.split()
     if len(parts) < 4:
-        bot.send_message(
-            ADMIN_ID,
-            "⚠️ **Format:** `/gen <code> <credits/perm> <max_users>`\n\n"
-            "Example 1: `/gen Ox1Rt5 100 5` (100 credits for 5 users)\n"
-            "Example 2: `/gen VIPPERM perm 1` (Permanent for 1 user)",
-            parse_mode="Markdown"
-        )
+        bot.send_message(ADMIN_ID, "⚠️ Format: `/gen <code> <credits/perm> <max_users>`\nExample: `/gen FREE50 50 10`", parse_mode="Markdown")
         return
 
     code = parts[1]
@@ -534,7 +472,7 @@ def generate_voucher_command(message):
     try:
         max_uses = int(parts[3])
     except ValueError:
-        bot.send_message(ADMIN_ID, "❌ Max users must be a numeric integer.")
+        bot.send_message(ADMIN_ID, "❌ Max users must be numeric.")
         return
 
     is_perm = 1 if cred_type == "perm" else 0
@@ -545,78 +483,38 @@ def generate_voucher_command(message):
         (code, cred_amt, is_perm, max_uses)
     )
     conn.commit()
-
     reward_text = "Permanent VIP Access" if is_perm else f"{cred_amt} Credits"
-    bot.send_message(
-        ADMIN_ID,
-        f"✅ **Voucher Created!**\n\n"
-        f"🔑 Code: `{code}`\n"
-        f"🎁 Reward: **{reward_text}**\n"
-        f"👥 Max Usable Users: **{max_uses}**",
-        parse_mode="Markdown"
-    )
+    bot.send_message(ADMIN_ID, f"✅ Created: `{code}` | Reward: {reward_text} | Max Users: {max_uses}", parse_mode="Markdown")
 
-# ================= ADMIN DASHBOARD & BROADCAST =================
-@bot.message_handler(func=lambda msg: msg.text in ["👑 Admin Panel", "/admin"])
-def admin_menu(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton("📢 Broadcast to All Users", callback_data="btn_admin_bc"),
-        types.InlineKeyboardButton("🎟️ Create Code Guide (/gen)", callback_data="btn_admin_gen_info")
-    )
-    bot.send_message(
-        ADMIN_ID,
-        f"👑 **Admin Control Center**\n\n"
-        f"👥 Registered Users: `{total_users}`\n"
-        f"💳 Primary UPI: `{UPI_ID}`",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
+# ================= BROADCAST =================
 @bot.callback_query_handler(func=lambda call: call.data == "btn_admin_gen_info")
 def admin_gen_info(call):
     if call.from_user.id != ADMIN_ID:
         return
-    bot.send_message(
-        ADMIN_ID,
-        "🎟️ **Voucher Generator Command Guide:**\n\n"
-        "• `/gen <code> <credits> <max_users>`\n"
-        "• Example: `/gen FREE50 50 10`\n"
-        "• Example Permanent: `/gen OXLIFETIME perm 1`",
-        parse_mode="Markdown"
-    )
+    bot.send_message(ADMIN_ID, "🎟️ Guide:\n• `/gen CODE 50 10`\n• `/gen CODE perm 1`", parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "btn_admin_bc")
 def admin_broadcast_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
-    msg = bot.send_message(ADMIN_ID, "📢 Send any Text, Photo, Video, or Document to broadcast to all users:")
+    msg = bot.send_message(ADMIN_ID, "📢 Send any message to broadcast:")
     bot.register_next_step_handler(msg, send_broadcast_all)
 
 def send_broadcast_all(message):
     if message.from_user.id != ADMIN_ID:
         return
-
     cursor.execute("SELECT user_id FROM users")
     users = cursor.fetchall()
-    sent, failed = 0, 0
-    bot.send_message(ADMIN_ID, f"⏳ Broadcasting message to {len(users)} users...")
-
+    sent = 0
     for (uid,) in users:
         try:
             bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
             sent += 1
         except Exception:
-            failed += 1
-
-    bot.send_message(ADMIN_ID, f"✅ **Broadcast Finished!**\n\nSent: {sent}\nFailed: {failed}")
+            pass
+    bot.send_message(ADMIN_ID, f"✅ Broadcast sent to {sent} users.")
 
 # ================= RUN BOT =================
 if __name__ == "__main__":
-    print("Temp Mail Bot is online...")
+    print("🤖 Temp Mail Bot successfully started...")
     bot.infinity_polling(skip_pending=True)
