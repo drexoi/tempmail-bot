@@ -1,6 +1,5 @@
 import os
-import random
-import string
+import re
 import html
 import sqlite3
 import threading
@@ -25,7 +24,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAF4wpSATobR1Zcf2XRB2An6Fg_EIqnuRLM"
+BOT_TOKEN = "8724616175:AAFJaAnYskBPSq4nZ8WxBUlYatpKcOl2shw"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
@@ -37,8 +36,6 @@ CHANNELS = [
 ]
 
 FOOTER_TEXT = "\n\nany issues / feedback @OxRehann"
-API_BASE = "https://www.1secmail.com/api/v1/"
-
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ================= DATABASE SETUP =================
@@ -51,9 +48,16 @@ CREATE TABLE IF NOT EXISTS users (
     credits INTEGER DEFAULT 1,
     is_permanent INTEGER DEFAULT 0,
     current_email TEXT DEFAULT NULL,
+    sid_token TEXT DEFAULT NULL,
     referred_by INTEGER DEFAULT NULL
 )
 """)
+
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN sid_token TEXT DEFAULT NULL")
+    conn.commit()
+except Exception:
+    pass
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -133,22 +137,86 @@ def get_main_keyboard(user_id):
         markup.add(types.KeyboardButton("👑 Admin Panel"))
     return markup
 
-def get_domains():
+# ================= GUERRILLA ENGINE =================
+G_API = "https://api.guerrillamail.com/ajax.php"
+G_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+def guerrilla_get_mail():
     try:
-        res = requests.get(f"{API_BASE}?action=getDomainList", timeout=5)
-        if res.status_code == 200:
-            return res.json()
+        r = requests.get(f"{G_API}?f=get_email_address", headers=G_HEADERS, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("email_addr"), data.get("sid_token")
     except Exception:
         pass
-    return ["1secmail.com", "1secmail.net", "1secmail.org"]
+    return None, None
 
-def generate_temp_email():
-    domains = get_domains()
-    login = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    domain = random.choice(domains)
-    return login, domain
+def guerrilla_check(sid):
+    try:
+        r = requests.get(f"{G_API}?f=check_email&seq=0&sid_token={sid}", headers=G_HEADERS, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("list", [])
+    except Exception:
+        pass
+    return []
 
-# ================= START COMMAND =================
+def guerrilla_read(sid, mail_id):
+    try:
+        r = requests.get(f"{G_API}?f=fetch_email&email_id={mail_id}&sid_token={sid}", headers=G_HEADERS, timeout=12)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+# ================= PRIORITY COMMAND HANDLERS =================
+
+# 1. /gen COMMAND
+@bot.message_handler(commands=['gen'])
+def generate_voucher_command(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ Aap admin nahi hain.")
+        return
+
+    parts = message.text.split()
+    if len(parts) < 4:
+        bot.send_message(
+            ADMIN_ID,
+            "⚠️ **Format:** `/gen <code> <credits/perm> <max_users>`\n\n"
+            "• **Example 1:** `/gen FREE50 50 10`\n"
+            "• **Example 2:** `/gen VIPPERM perm 1`",
+            parse_mode="Markdown"
+        )
+        return
+
+    code = parts[1].strip()
+    cred_type = parts[2].lower().strip()
+    try:
+        max_uses = int(parts[3])
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ Max users number hona chahiye (Example: 5 ya 10).")
+        return
+
+    is_perm = 1 if cred_type == "perm" else 0
+    cred_amt = 0 if is_perm else int(cred_type)
+
+    cursor.execute(
+        "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_users, used_count) VALUES (?, ?, ?, ?, 0)",
+        (code, cred_amt, is_perm, max_uses)
+    )
+    conn.commit()
+    reward_text = "Permanent VIP Access" if is_perm else f"{cred_amt} Credits"
+    bot.send_message(
+        ADMIN_ID,
+        f"✅ **Voucher Ban Gaya!**\n\n"
+        f"🔑 **Code:** `{code}`\n"
+        f"🎁 **Reward:** {reward_text}\n"
+        f"👥 **Max Users:** {max_uses}",
+        parse_mode="Markdown"
+    )
+
+# 2. START COMMAND
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     user_id = message.from_user.id
@@ -177,7 +245,7 @@ def send_welcome(message):
         "👋 **Temp Mail Bot me aapka swagat hai!**\n\n"
         f"💎 **Account Plan:** {status_str}\n"
         f"📧 **Active Email:** `{active_email or 'None'}`\n\n"
-        "Bina registration ke temporary emails create karein aur instant verification OTP receive karein."
+        "Temporary email generate karein aur instant verification OTP receive karein."
         f"{FOOTER_TEXT}"
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
@@ -195,7 +263,7 @@ def verify_channels_callback(call):
         bot.answer_callback_query(call.id, "⚠️ Please join all 4 channels first!", show_alert=True)
 
 # ================= MAIN BUTTON HANDLER =================
-@bot.message_handler(content_types=['text'])
+@bot.message_handler(func=lambda msg: not msg.text.startswith('/'))
 def handle_text_buttons(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -215,63 +283,62 @@ def handle_text_buttons(message):
             bot.send_message(chat_id, f"❌ **Insufficient Credits!**\n\nYou need 1 Credit to generate an email. Refer friends or buy credits.{FOOTER_TEXT}", parse_mode="Markdown")
             return
 
-        login, domain = generate_temp_email()
-        full_email = f"{login}@{domain}"
+        w = bot.send_message(chat_id, "⏳ Generating active email...")
+        email, sid = guerrilla_get_mail()
+
+        if not email or not sid:
+            bot.edit_message_text(f"⚠️ Service busy. Tap '📧 Generate Email' again in 5 seconds.{FOOTER_TEXT}", chat_id, w.message_id)
+            return
 
         if not is_perm:
-            cursor.execute("UPDATE users SET credits = credits - 1, current_email = ? WHERE user_id = ?", (full_email, user_id))
+            cursor.execute("UPDATE users SET credits = credits - 1, current_email = ?, sid_token = ? WHERE user_id = ?", (email, sid, user_id))
         else:
-            cursor.execute("UPDATE users SET current_email = ? WHERE user_id = ?", (full_email, user_id))
+            cursor.execute("UPDATE users SET current_email = ?, sid_token = ? WHERE user_id = ?", (email, sid, user_id))
         conn.commit()
 
+        bot.delete_message(chat_id, w.message_id)
         resp = (
             f"🎉 **Aapka Temporary Email ready hai:**\n\n"
-            f"`{full_email}`\n\n"
-            f"_(Click karke copy karein. Verification mail aane par '📬 Check Inbox' dabayein.)_"
+            f"`{email}`\n\n"
+            f"_(Click karke copy karein. OTP aane par '📬 Check Inbox' dabayein.)_"
             f"{FOOTER_TEXT}"
         )
         bot.send_message(chat_id, resp, parse_mode="Markdown")
 
     # 2. Check Inbox
     elif text == "📬 Check Inbox":
-        cursor.execute("SELECT current_email FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT current_email, sid_token FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
-        if not row or not row[0]:
+        if not row or not row[0] or not row[1]:
             bot.send_message(chat_id, f"❌ Pehle **📧 Generate Email** par click karke ek email create karein.{FOOTER_TEXT}")
             return
 
-        full_email = row[0]
-        login, domain = full_email.split("@")
-        inbox_url = f"{API_BASE}?action=getMessages&login={login}&domain={domain}"
+        email, sid = row[0], row[1]
+        msgs = guerrilla_check(sid)
 
-        try:
-            res = requests.get(inbox_url, timeout=10).json()
-            if not res:
-                bot.send_message(
-                    chat_id, 
-                    f"📭 **Inbox Khali Hai!**\n\nEmail: `{full_email}`\nAbhi tak koi naya message nahi aaya."
-                    f"{FOOTER_TEXT}", 
-                    parse_mode="Markdown"
-                )
-                return
+        real_msgs = [m for m in msgs if "welcome" not in m.get("mail_subject", "").lower()]
 
-            markup = types.InlineKeyboardMarkup()
-            summary = f"📬 **Inbox Messages ({len(res)}):**\n\n"
-            
-            for item in res[:10]:
-                mail_id = item.get("id")
-                from_user = item.get("from", "Unknown")
-                subject = item.get("subject", "No Subject")
-                date = item.get("date", "")
+        if not real_msgs:
+            bot.send_message(
+                chat_id, 
+                f"📭 **Inbox Khali Hai!**\n\nEmail: `{email}`\nAbhi tak koi naya message/OTP nahi aaya. Kuch second baad dobara check karein."
+                f"{FOOTER_TEXT}", 
+                parse_mode="Markdown"
+            )
+            return
 
-                summary += f"🔹 **From:** `{from_user}`\n**Subject:** {html.escape(subject)}\n**Date:** {date}\n\n"
-                btn = types.InlineKeyboardButton(f"📖 Read: {subject[:20]}...", callback_data=f"read_{mail_id}")
-                markup.add(btn)
+        markup = types.InlineKeyboardMarkup()
+        summary = f"📬 **Inbox Messages ({len(real_msgs)}):**\n\n"
+        
+        for item in real_msgs[:5]:
+            mail_id = item.get("mail_id")
+            from_user = item.get("mail_from", "Unknown")
+            subject = item.get("mail_subject", "No Subject")
+            summary += f"🔹 **From:** `{from_user}`\n**Subject:** {html.escape(subject)}\n\n"
+            btn = types.InlineKeyboardButton(f"📖 Read: {subject[:20]}...", callback_data=f"gread_{mail_id}")
+            markup.add(btn)
 
-            bot.send_message(chat_id, summary, parse_mode="Markdown", reply_markup=markup)
-
-        except Exception as e:
-            bot.send_message(chat_id, f"⚠️ Inbox check karne me error aaya: {str(e)}{FOOTER_TEXT}")
+        bot.send_message(chat_id, summary, parse_mode="Markdown", reply_markup=markup)
 
     # 3. Current Mail
     elif text == "ℹ️ Current Mail":
@@ -321,46 +388,35 @@ def handle_text_buttons(message):
         )
         bot.send_message(ADMIN_ID, f"👑 **Admin Panel**\n\nTotal Users: `{total}`\nUPI: `{UPI_ID}`", reply_markup=markup, parse_mode="Markdown")
 
-# ================= READ EMAIL CONTENT =================
-@bot.callback_query_handler(func=lambda call: call.data.startswith("read_"))
-def read_single_mail(call):
+# ================= READ EMAIL =================
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gread_"))
+def read_guerrilla_mail_callback(call):
     user_id = call.from_user.id
     chat_id = call.message.chat.id
     mail_id = call.data.split("_")[1]
 
-    cursor.execute("SELECT current_email FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT sid_token FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if not row or not row[0]:
-        bot.answer_callback_query(call.id, "Session expired, please regenerate mail.")
+        bot.answer_callback_query(call.id, "Session expired, generate a new mail.")
         return
 
-    login, domain = row[0].split("@")
-    read_url = f"{API_BASE}?action=readMessage&login={login}&domain={domain}&id={mail_id}"
+    sid = row[0]
+    data = guerrilla_read(sid, mail_id)
+    subject = data.get("mail_subject", "No Subject")
+    sender = data.get("mail_from", "Unknown")
+    body = data.get("mail_body", "No Body").strip()
+    clean_body = re.sub('<[^<]+?>', '', body)[:3500]
 
-    try:
-        data = requests.get(read_url, timeout=10).json()
-        subject = data.get("subject", "No Subject")
-        sender = data.get("from", "Unknown")
-        date = data.get("date", "")
-        text_body = data.get("textBody", "").strip() or data.get("body", "No Text Content")
-
-        if len(text_body) > 3500:
-            text_body = text_body[:3500] + "\n\n...[Truncated]"
-
-        full_msg = (
-            f"📨 **Subject:** {subject}\n"
-            f"👤 **From:** `{sender}`\n"
-            f"🕒 **Date:** {date}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{text_body}"
-            f"{FOOTER_TEXT}"
-        )
-        bot.answer_callback_query(call.id)
-        bot.send_message(chat_id, full_msg)
-
-    except Exception as e:
-        bot.answer_callback_query(call.id, "Mail open nahi ho paya!")
-        bot.send_message(chat_id, f"⚠️ Error: {str(e)}")
+    full_msg = (
+        f"📨 **Subject:** {subject}\n"
+        f"👤 **From:** `{sender}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{clean_body}"
+        f"{FOOTER_TEXT}"
+    )
+    bot.answer_callback_query(call.id)
+    bot.send_message(chat_id, full_msg)
 
 # ================= BUY WORKFLOW & APPROVALS =================
 @bot.callback_query_handler(func=lambda call: call.data in ["buy_9", "buy_29"])
@@ -391,7 +447,6 @@ def process_payment_proof(message, plan_name):
         f"👤 User: `{user_id}` (@{message.from_user.username or 'NoUser'})\n"
         f"📦 Requested Plan: **{plan_name}**"
     )
-    
     bot.send_message(ADMIN_ID, admin_note, parse_mode="Markdown")
     bot.copy_message(ADMIN_ID, user_id, message.message_id, reply_markup=markup)
     bot.send_message(user_id, f"✅ **Payment Submitted!**\n\nYour proof is sent to admin for verification.{FOOTER_TEXT}", parse_mode="Markdown")
@@ -421,7 +476,7 @@ def handle_admin_decision(call):
         bot.edit_message_caption("❌ Rejected.", ADMIN_ID, call.message.message_id)
         bot.send_message(target_uid, f"❌ **Payment Rejected!**\n\nInvalid proof or transaction not found. Contact @OxRehann.{FOOTER_TEXT}", parse_mode="Markdown")
 
-# ================= REDEEM & /GEN WORKFLOW =================
+# ================= REDEEM WORKFLOW =================
 def process_code_redemption(message):
     user_id = message.from_user.id
     code = message.text.strip()
@@ -457,41 +512,12 @@ def process_code_redemption(message):
     conn.commit()
     bot.send_message(user_id, f"🎉 **Code Redeemed!**\n\nYou received: **{reward}**!{FOOTER_TEXT}", parse_mode="Markdown")
 
-@bot.message_handler(commands=['gen'])
-def generate_voucher_command(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    parts = message.text.split()
-    if len(parts) < 4:
-        bot.send_message(ADMIN_ID, "⚠️ Format: `/gen <code> <credits/perm> <max_users>`\nExample: `/gen FREE50 50 10`", parse_mode="Markdown")
-        return
-
-    code = parts[1]
-    cred_type = parts[2].lower()
-    try:
-        max_uses = int(parts[3])
-    except ValueError:
-        bot.send_message(ADMIN_ID, "❌ Max users must be numeric.")
-        return
-
-    is_perm = 1 if cred_type == "perm" else 0
-    cred_amt = 0 if is_perm else int(cred_type)
-
-    cursor.execute(
-        "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_uses, used_count) VALUES (?, ?, ?, ?, 0)",
-        (code, cred_amt, is_perm, max_uses)
-    )
-    conn.commit()
-    reward_text = "Permanent VIP Access" if is_perm else f"{cred_amt} Credits"
-    bot.send_message(ADMIN_ID, f"✅ Created: `{code}` | Reward: {reward_text} | Max Users: {max_uses}", parse_mode="Markdown")
-
 # ================= BROADCAST =================
 @bot.callback_query_handler(func=lambda call: call.data == "btn_admin_gen_info")
 def admin_gen_info(call):
     if call.from_user.id != ADMIN_ID:
         return
-    bot.send_message(ADMIN_ID, "🎟️ Guide:\n• `/gen CODE 50 10`\n• `/gen CODE perm 1`", parse_mode="Markdown")
+    bot.send_message(ADMIN_ID, "🎟️ Guide:\n• `/gen FREE50 50 10`\n• `/gen VIPPERM perm 1`", parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "btn_admin_bc")
 def admin_broadcast_prompt(call):
