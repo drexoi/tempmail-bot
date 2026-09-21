@@ -1,4 +1,7 @@
 import os
+import time
+import random
+import string
 import sqlite3
 import threading
 import requests
@@ -11,7 +14,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
-        self.wfile.write(b"Temp Mail Bot is running!")
+        self.wfile.write(b"Temp Mail Bot is active!")
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -46,9 +49,17 @@ CREATE TABLE IF NOT EXISTS users (
     credits INTEGER DEFAULT 1,
     is_permanent INTEGER DEFAULT 0,
     current_email TEXT DEFAULT NULL,
+    account_token TEXT DEFAULT NULL,
     referred_by INTEGER DEFAULT NULL
 )
 """)
+
+# Migration helper for older database schemas
+try:
+    cursor.execute("ALTER TABLE users ADD COLUMN account_token TEXT DEFAULT NULL")
+    conn.commit()
+except Exception:
+    pass
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS vouchers (
@@ -70,6 +81,9 @@ CREATE TABLE IF NOT EXISTS voucher_redemptions (
 conn.commit()
 
 # ================= HELPER FUNCTIONS =================
+def random_string(length=8):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
+
 def register_user(user_id, referrer_id=None):
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
@@ -130,10 +144,41 @@ def get_main_keyboard(user_id):
     return markup
 
 def get_user_status(user_id):
-    cursor.execute("SELECT credits, is_permanent, current_email FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT credits, is_permanent, current_email, account_token FROM users WHERE user_id = ?", (user_id,))
     return cursor.fetchone()
 
-# ================= START & VERIFICATION =================
+# ================= TEMP MAIL ENGINE (MAIL.GW) =================
+def create_temp_mailbox():
+    headers = {"Content-Type": "application/json"}
+    
+    # 1. Fetch available domain
+    d_res = requests.get("https://api.mail.gw/domains", headers=headers, timeout=10)
+    if d_res.status_code != 200:
+        return None, None
+    domains_data = d_res.json().get("hydra:member", [])
+    if not domains_data:
+        return None, None
+    domain = domains_data[0]["domain"]
+    
+    username = f"user_{random_string(8)}"
+    email_address = f"{username}@{domain}"
+    password = f"P@{random_string(10)}"
+
+    # 2. Register mailbox
+    reg_payload = {"address": email_address, "password": password}
+    reg_res = requests.post("https://api.mail.gw/accounts", json=reg_payload, headers=headers, timeout=10)
+    if reg_res.status_code not in [200, 201]:
+        return None, None
+
+    # 3. Obtain authentication token
+    token_res = requests.post("https://api.mail.gw/token", json=reg_payload, headers=headers, timeout=10)
+    if token_res.status_code != 200:
+        return None, None
+    
+    token = token_res.json().get("token")
+    return email_address, token
+
+# ================= USER / GENERAL HANDLERS =================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
@@ -198,7 +243,7 @@ def generate_mail(message):
     status = get_user_status(user_id)
     if not status:
         return
-    credits, is_perm, _ = status
+    credits, is_perm, _, _ = status
 
     if not is_perm and credits < 1:
         bot.send_message(
@@ -208,25 +253,32 @@ def generate_mail(message):
         )
         return
 
-    try:
-        res = requests.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", timeout=10)
-        new_mail = res.json()[0]
-    except Exception:
-        bot.send_message(user_id, f"⚠️ Mail server busy. Please try again.{FOOTER_TEXT}")
+    wait_msg = bot.send_message(user_id, "⏳ Generating temporary mailbox...")
+    new_mail, token = create_temp_mailbox()
+
+    if not new_mail:
+        bot.edit_message_text(f"⚠️ Mail service is temporarily busy. Please tap again in 5 seconds.{FOOTER_TEXT}", user_id, wait_msg.message_id)
         return
 
     if not is_perm:
-        cursor.execute("UPDATE users SET credits = credits - 1, current_email = ? WHERE user_id = ?", (new_mail, user_id))
+        cursor.execute(
+            "UPDATE users SET credits = credits - 1, current_email = ?, account_token = ? WHERE user_id = ?",
+            (new_mail, token, user_id)
+        )
     else:
-        cursor.execute("UPDATE users SET current_email = ? WHERE user_id = ?", (new_mail, user_id))
+        cursor.execute(
+            "UPDATE users SET current_email = ?, account_token = ? WHERE user_id = ?",
+            (new_mail, token, user_id)
+        )
     conn.commit()
 
+    bot.delete_message(user_id, wait_msg.message_id)
     bot.send_message(
         user_id,
-        f"✅ **New Email Generated!**\n\n"
+        f"✅ **New Temporary Email Ready!**\n\n"
         f"📧 `{new_mail}`\n\n"
-        "*(Tap the email above to copy it)*\n\n"
-        "Send your verification code to this address, then click **📬 Check Inbox / OTP**."
+        "*(Tap the email address above to copy it)*\n\n"
+        "Send your OTP or confirmation to this address, then click **📬 Check Inbox / OTP**."
         f"{FOOTER_TEXT}",
         parse_mode="Markdown"
     )
@@ -239,42 +291,43 @@ def check_inbox(message):
         return
 
     status = get_user_status(user_id)
-    if not status or not status[2]:
-        bot.send_message(user_id, f"⚠️ You have not generated an email yet! Tap '🎲 Generate Mail'.{FOOTER_TEXT}")
+    if not status or not status[2] or not status[3]:
+        bot.send_message(user_id, f"⚠️ You haven't generated an email yet! Tap '🎲 Generate Mail'.{FOOTER_TEXT}")
         return
 
-    mail = status[2]
+    mail, token = status[2], status[3]
+    headers = {"Authorization": f"Bearer {token}"}
+
     try:
-        user_name, domain = mail.split("@")
-        url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={user_name}&domain={domain}"
-        msgs = requests.get(url, timeout=10).json()
+        res = requests.get("https://api.mail.gw/messages", headers=headers, timeout=10)
+        msgs_data = res.json().get("hydra:member", [])
     except Exception:
-        bot.send_message(user_id, f"⚠️ Error checking inbox. Please try again.{FOOTER_TEXT}")
+        bot.send_message(user_id, f"⚠️ Error fetching inbox. Please try again.{FOOTER_TEXT}")
         return
 
-    if not msgs:
+    if not msgs_data:
         bot.send_message(
             user_id,
-            f"📭 **Inbox Empty**\n\nEmail: `{mail}`\nNo incoming messages yet. Send OTP and check again."
+            f"📭 **Inbox is Empty**\n\nTarget Email: `{mail}`\nNo incoming messages yet. Send OTP and check again."
             f"{FOOTER_TEXT}",
             parse_mode="Markdown"
         )
         return
 
-    for item in msgs[:3]:
+    for item in msgs_data[:3]:
         m_id = item["id"]
-        detail_url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={user_name}&domain={domain}&id={m_id}"
-        detail = requests.get(detail_url, timeout=10).json()
+        detail_res = requests.get(f"https://api.mail.gw/messages/{m_id}", headers=headers, timeout=10)
+        detail = detail_res.json()
         
-        sender = detail.get("from", "Unknown")
+        sender = detail.get("from", {}).get("address", "Unknown Sender")
         subject = detail.get("subject", "No Subject")
-        body = detail.get("textBody", "HTML Message").strip()
-        
+        text_body = detail.get("text", detail.get("intro", "No Body Text")).strip()
+
         content = (
             f"📩 **New Message / OTP Received!**\n\n"
             f"👤 **From:** `{sender}`\n"
             f"📝 **Subject:** `{subject}`\n\n"
-            f"📄 **Body:**\n`{body[:800]}`"
+            f"📄 **Message:**\n`{text_body[:800]}`"
             f"{FOOTER_TEXT}"
         )
         bot.send_message(user_id, content, parse_mode="Markdown")
@@ -283,8 +336,8 @@ def check_inbox(message):
 def balance_info(message):
     user_id = message.from_user.id
     status = get_user_status(user_id)
-    credits, is_perm, mail = status
-    perm = "Yes (Unlimited)" if is_perm else "No"
+    credits, is_perm, mail, _ = status
+    perm = "Yes (Lifetime Unlimited)" if is_perm else "No"
     bot_info = bot.get_me().username
     
     cursor.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
@@ -297,7 +350,7 @@ def balance_info(message):
         f"🌟 **Permanent Access:** `{perm}`\n"
         f"👥 **Total Referrals:** `{total_refs}`\n"
         f"📧 **Active Mail:** `{mail or 'None'}`\n\n"
-        f"🔗 **Referral Link:**\n`https://t.me/{bot_info}?start={user_id}`"
+        f"🔗 **Your Referral Link:**\n`https://t.me/{bot_info}?start={user_id}`"
         f"{FOOTER_TEXT}"
     )
     bot.send_message(user_id, text, parse_mode="Markdown")
@@ -310,8 +363,8 @@ def refer_earn(message):
     bot.send_message(
         user_id,
         f"👥 **Refer & Earn Program!**\n\n"
-        "Invite your friends to use this bot and get **2 Credits** per successful invite!\n\n"
-        f"🔗 **Your Unique Link:**\n`{link}`"
+        "Invite your friends to use this bot and receive **+2 Credits** per successful invite!\n\n"
+        f"🔗 **Your Referral Link:**\n`{link}`"
         f"{FOOTER_TEXT}",
         parse_mode="Markdown"
     )
@@ -343,7 +396,7 @@ def initiate_payment(call):
     text = (
         f"💳 **Payment Request: {plan_name}**\n\n"
         f"Send the payment to UPI ID:\n👉 `{UPI_ID}`\n\n"
-        "After paying, reply directly to the next prompt with your **Payment Screenshot or UTR Number**."
+        "After paying, reply directly with your **Payment Screenshot or UTR Number**."
         f"{FOOTER_TEXT}"
     )
     msg = bot.send_message(user_id, text, parse_mode="Markdown")
