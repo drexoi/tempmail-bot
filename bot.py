@@ -21,7 +21,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAF0cEQ8FoNZRPIb7FI0neOrpVZxlg1XFfg"
+BOT_TOKEN = "8724616175:AAFEDJjezwGZvTK14Or5blOBoCOCg8aoSwY"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# Safe migration check
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN session_id TEXT DEFAULT NULL")
     conn.commit()
@@ -527,7 +526,7 @@ def generate_voucher_command(message):
     cred_amt = 0 if is_perm else int(cred_type)
 
     cursor.execute(
-        "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_uses, used_count) VALUES (?, ?, ?, ?, 0)",
+        "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_users, used_count) VALUES (?, ?, ?, ?, 0)",
         (code, cred_amt, is_perm, max_uses)
     )
     conn.commit()
