@@ -24,7 +24,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8724616175:AAETzb6ambWGVAI0lnMdz1VWBaR0WwQC494"
+BOT_TOKEN = "8724616175:AAF0cEQ8FoNZRPIb7FI0neOrpVZxlg1XFfg"
 ADMIN_ID = 8671410379
 UPI_ID = "Oxrehan11@oksbi"
 
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS users (
 )
 """)
 
-# Migration helper for older database schemas
+# Migration helper for existing databases
 try:
     cursor.execute("ALTER TABLE users ADD COLUMN account_token TEXT DEFAULT NULL")
     conn.commit()
@@ -150,35 +150,34 @@ def get_user_status(user_id):
 # ================= TEMP MAIL ENGINE (MAIL.GW) =================
 def create_temp_mailbox():
     headers = {"Content-Type": "application/json"}
-    
-    # 1. Fetch available domain
-    d_res = requests.get("https://api.mail.gw/domains", headers=headers, timeout=10)
-    if d_res.status_code != 200:
-        return None, None
-    domains_data = d_res.json().get("hydra:member", [])
-    if not domains_data:
-        return None, None
-    domain = domains_data[0]["domain"]
-    
-    username = f"user_{random_string(8)}"
-    email_address = f"{username}@{domain}"
-    password = f"P@{random_string(10)}"
+    try:
+        d_res = requests.get("https://api.mail.gw/domains", headers=headers, timeout=10)
+        if d_res.status_code != 200:
+            return None, None
+        domains_data = d_res.json().get("hydra:member", [])
+        if not domains_data:
+            return None, None
+        domain = domains_data[0]["domain"]
+        
+        username = f"user_{random_string(8)}"
+        email_address = f"{username}@{domain}"
+        password = f"P@{random_string(10)}"
 
-    # 2. Register mailbox
-    reg_payload = {"address": email_address, "password": password}
-    reg_res = requests.post("https://api.mail.gw/accounts", json=reg_payload, headers=headers, timeout=10)
-    if reg_res.status_code not in [200, 201]:
+        reg_payload = {"address": email_address, "password": password}
+        reg_res = requests.post("https://api.mail.gw/accounts", json=reg_payload, headers=headers, timeout=10)
+        if reg_res.status_code not in [200, 201]:
+            return None, None
+
+        token_res = requests.post("https://api.mail.gw/token", json=reg_payload, headers=headers, timeout=10)
+        if token_res.status_code != 200:
+            return None, None
+        
+        token = token_res.json().get("token")
+        return email_address, token
+    except Exception:
         return None, None
 
-    # 3. Obtain authentication token
-    token_res = requests.post("https://api.mail.gw/token", json=reg_payload, headers=headers, timeout=10)
-    if token_res.status_code != 200:
-        return None, None
-    
-    token = token_res.json().get("token")
-    return email_address, token
-
-# ================= USER / GENERAL HANDLERS =================
+# ================= START & VERIFICATION =================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
@@ -257,7 +256,7 @@ def generate_mail(message):
     new_mail, token = create_temp_mailbox()
 
     if not new_mail:
-        bot.edit_message_text(f"⚠️ Mail service is temporarily busy. Please tap again in 5 seconds.{FOOTER_TEXT}", user_id, wait_msg.message_id)
+        bot.edit_message_text(f"⚠️ Mail service is temporarily busy. Please tap again in a moment.{FOOTER_TEXT}", user_id, wait_msg.message_id)
         return
 
     if not is_perm:
@@ -493,7 +492,7 @@ def process_code_redemption(message):
     conn.commit()
     bot.send_message(user_id, f"🎉 **Code Redeemed Successfully!**\n\nYou received: **{reward}**!{FOOTER_TEXT}", parse_mode="Markdown")
 
-# Admin /gen command: /gen <code > <credits/perm> <max_devices>
+# Admin /gen command: /gen <code> <credits/perm> <max_devices>
 @bot.message_handler(commands=['gen'])
 def generate_voucher_command(message):
     if message.from_user.id != ADMIN_ID:
@@ -523,7 +522,7 @@ def generate_voucher_command(message):
 
     cursor.execute(
         "INSERT OR REPLACE INTO vouchers (code, credits, is_permanent, max_uses, used_count) VALUES (?, ?, ?, ?, 0)",
-        (code, cred_amt, is_perm, max_uses)
+     (code, cred_amt, is_perm, max_uses)
     )
     conn.commit()
 
